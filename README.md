@@ -1,5 +1,12 @@
 # SoundTouch Hybrid Card
 
+<img width="502" height="494" alt="image" src="https://github.com/user-attachments/assets/01ca4f70-0ef5-4d03-a41a-035b7a6141a6" />
+<img width="501" height="497" alt="image" src="https://github.com/user-attachments/assets/aeb88634-4459-421c-92de-b9c9b3f9e112" />
+<img width="502" height="496" alt="image" src="https://github.com/user-attachments/assets/d8ae8002-2049-48c1-822f-628fb679ac9a" />
+<img width="504" height="506" alt="image" src="https://github.com/user-attachments/assets/e230d9b9-d332-4917-9ca0-f2a1f4d9e47f" />
+
+
+
 A standalone Home Assistant Lovelace custom card to control Bose SoundTouch speakers via the [Bose SoundTouch Hybrid](https://github.com/TJGigs/Bose-SoundTouch-Hybrid) add-on, with a favorite button powered by [Music Assistant](https://music-assistant.io/).
 
 ## Requirements
