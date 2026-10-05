@@ -45,8 +45,10 @@ class SoundtouchHybridCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    // Only re-render if we already have device data
-    if (this._devices.length) this._render();
+    // Only re-render if we already have device data, and not while the
+    // user is actively dragging a slider (hass updates for unrelated
+    // entities would otherwise reset the slider mid-drag).
+    if (this._devices.length && !this._interacting) this._render();
   }
 
   getCardSize() {
