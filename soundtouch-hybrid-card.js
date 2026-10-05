@@ -85,6 +85,7 @@ class SoundtouchHybridCard extends HTMLElement {
   }
 
   async _loadStatus() {
+    if (this._interacting) return;
     try {
       const res = await this._boseFetch("api/status");
       this._devices = await res.json();
@@ -412,6 +413,7 @@ class SoundtouchHybridCard extends HTMLElement {
 
     const show = () => {
       if (input.disabled) return;
+      this._interacting = true;
       input.classList.add("active");
       bubble.classList.add("visible");
       updateBubble();
@@ -419,6 +421,9 @@ class SoundtouchHybridCard extends HTMLElement {
     const hide = () => {
       input.classList.remove("active");
       bubble.classList.remove("visible");
+      // Keep polling paused briefly so the device has time to catch up
+      // to the value we just sent, avoiding a visible snap-back.
+      setTimeout(() => { this._interacting = false; }, 600);
     };
 
     input.addEventListener("pointerdown", show);
