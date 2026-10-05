@@ -299,6 +299,7 @@ class SoundtouchHybridCard extends HTMLElement {
 
       <div class="volume-row">
         <span class="vol-label">VOL</span>
+        <span class="vol-bubble"></span>
         <input type="range" class="volume" min="0" max="100" value="${d.volume}" ${isStandby ? "disabled" : ""}>
         <span class="vol-value">${d.volume}</span>
       </div>
@@ -306,6 +307,7 @@ class SoundtouchHybridCard extends HTMLElement {
       ${isGroupMaster && members.length ? `
       <div class="volume-row group-volume-row">
         <span class="vol-label">GRP</span>
+        <span class="vol-bubble"></span>
         <input type="range" class="group-volume" min="0" max="100" value="${groupMaxVolume}">
         <span class="vol-value">${groupMaxVolume}</span>
       </div>` : ""}
@@ -361,22 +363,24 @@ class SoundtouchHybridCard extends HTMLElement {
     const volume = this._cardEl.querySelector(".volume");
     if (volume) {
       let throttle = null;
-      volume.oninput = () => {
-        this._cardEl.querySelector(".vol-value").textContent = volume.value;
+      this._bindSliderBubble(volume);
+      volume.addEventListener("input", () => {
+        this._cardEl.querySelector(".volume-row:not(.group-volume-row) .vol-value").textContent = volume.value;
         if (!throttle) {
           throttle = setTimeout(() => {
             this._sendVolume(d.ip, volume.value);
             throttle = null;
           }, 150);
         }
-      };
+      });
     }
 
     const groupVolume = this._cardEl.querySelector(".group-volume");
     if (groupVolume) {
       let lastRef = parseInt(groupVolume.value, 10);
       let throttle = null;
-      groupVolume.oninput = () => {
+      this._bindSliderBubble(groupVolume);
+      groupVolume.addEventListener("input", () => {
         const val = parseInt(groupVolume.value, 10);
         groupVolume.parentElement.querySelector(".vol-value").textContent = val;
         if (!throttle) {
@@ -387,8 +391,40 @@ class SoundtouchHybridCard extends HTMLElement {
             throttle = null;
           }, 150);
         }
-      };
+      });
     }
+  }
+
+  _bindSliderBubble(input) {
+    const row = input.parentElement;
+    const bubble = row.querySelector(".vol-bubble");
+    if (!bubble) return;
+
+    const updateBubble = () => {
+      const min = parseFloat(input.min);
+      const max = parseFloat(input.max);
+      const percent = (parseFloat(input.value) - min) / (max - min);
+      const thumbSize = 26;
+      const left = percent * (input.offsetWidth - thumbSize) + thumbSize / 2;
+      bubble.style.left = `${left}px`;
+      bubble.textContent = input.value;
+    };
+
+    const show = () => {
+      if (input.disabled) return;
+      input.classList.add("active");
+      bubble.classList.add("visible");
+      updateBubble();
+    };
+    const hide = () => {
+      input.classList.remove("active");
+      bubble.classList.remove("visible");
+    };
+
+    input.addEventListener("pointerdown", show);
+    input.addEventListener("pointerup", hide);
+    input.addEventListener("pointercancel", hide);
+    input.addEventListener("input", updateBubble);
   }
 
   static getConfigElement() {
@@ -772,6 +808,7 @@ const CARD_CSS = `
   border-color: rgba(255,255,255,0.3);
 }
 .volume-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -795,8 +832,66 @@ const CARD_CSS = `
   opacity: 0.9;
 }
 input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
   flex-grow: 1;
-  accent-color: var(--accent-color, #2ecc71);
+  height: 4px;
+  border-radius: 2px;
+  background: var(--divider-color, rgba(128,128,128,0.3));
+  cursor: pointer;
+  touch-action: pan-y;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-color, #2ecc71);
+  cursor: pointer;
+  transition: width 0.1s ease, height 0.1s ease;
+}
+input[type=range]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-color, #2ecc71);
+  cursor: pointer;
+  transition: width 0.1s ease, height 0.1s ease;
+}
+input[type=range].active::-webkit-slider-thumb {
+  width: 30px;
+  height: 30px;
+}
+input[type=range].active::-moz-range-thumb {
+  width: 30px;
+  height: 30px;
+}
+input[type=range].group-volume::-webkit-slider-thumb { background: #9b59b6; }
+input[type=range].group-volume::-moz-range-thumb { background: #9b59b6; }
+input[type=range]:disabled { opacity: 0.4; cursor: default; }
+
+.vol-bubble {
+  position: absolute;
+  top: -26px;
+  transform: translateX(-50%);
+  background: var(--accent-color, #2ecc71);
+  color: #000;
+  font-weight: bold;
+  font-size: 0.75rem;
+  padding: 2px 7px;
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 3;
+}
+.group-volume-row .vol-bubble {
+  background: #9b59b6;
+  color: #fff;
+}
+.vol-bubble.visible {
+  opacity: 1;
 }
 .shadow-top, .shadow-bottom {
   position: absolute;
