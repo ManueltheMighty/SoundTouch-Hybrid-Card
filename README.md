@@ -1,5 +1,9 @@
 # SoundTouch Hybrid Card
 
+[![Release](https://img.shields.io/github/v/release/ManueltheMighty/SoundTouch-Hybrid-Card)](https://github.com/ManueltheMighty/SoundTouch-Hybrid-Card/releases)
+[![Validate](https://github.com/ManueltheMighty/SoundTouch-Hybrid-Card/actions/workflows/validate.yml/badge.svg)](https://github.com/ManueltheMighty/SoundTouch-Hybrid-Card/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/github/license/ManueltheMighty/SoundTouch-Hybrid-Card)](LICENSE)
+
 <img width="502" height="494" alt="image" src="https://github.com/user-attachments/assets/01ca4f70-0ef5-4d03-a41a-035b7a6141a6" />
 <img width="501" height="497" alt="image" src="https://github.com/user-attachments/assets/aeb88634-4459-421c-92de-b9c9b3f9e112" />
 <img width="502" height="496" alt="image" src="https://github.com/user-attachments/assets/d8ae8002-2049-48c1-822f-628fb679ac9a" />
@@ -74,6 +78,12 @@ In practice, both Bose SoundTouch Hybrid and Music Assistant commonly allow CORS
 - Favorite button (adds the currently playing song to Deezer/Spotify/etc. favorites via Music Assistant)
 - Square card layout, fitting nicely into the Sections dashboard grid
 - Visual editor for configuration
+
+## Updating
+
+HACS only offers updates for new GitHub releases. After updating, do a hard reload of your browser (Ctrl+Shift+R).
+
+See the [changelog](CHANGELOG.md) for what changed. Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 
