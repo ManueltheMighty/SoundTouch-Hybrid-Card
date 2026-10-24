@@ -23,6 +23,38 @@
  * listed here, the heart button is simply hidden for it.
  */
 
+// ---------- Security helpers ----------
+// Everything coming from the backend (speaker names, track/artist metadata,
+// artwork URLs) is untrusted: it can originate from internet radio metadata,
+// Bluetooth/AUX sources or streaming services.
+
+const escapeHtml = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[c]));
+
+// Returns a normalized http(s) URL (relative URLs are resolved against the
+// current origin), or null for anything else (javascript:, data:, etc.).
+const safeUrl = (value) => {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const u = new URL(value, window.location.origin);
+    if (u.protocol === "http:" || u.protocol === "https:") return u.href;
+  } catch (e) {
+    // invalid URL
+  }
+  return null;
+};
+
+const toNumber = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
 class SoundtouchHybridCard extends HTMLElement {
 
   setConfig(config) {
@@ -203,9 +235,11 @@ class SoundtouchHybridCard extends HTMLElement {
     const cells = nums.map(n => {
       const active = d.activePreset === n;
       const item = this._presetMap[d.ip + "_" + n] || this._presetMap["_" + n];
-      const hasImage = item && item.image && item.image !== "custom_url";
+      const hasImage = !!(item && item.image && item.image !== "custom_url" && safeUrl(item.image));
+      // The image URL is NOT interpolated here; it is assigned via the DOM
+      // property in _applyImages() after rendering.
       const inner = hasImage
-        ? `<img src="${item.image}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+        ? `<img class="preset-img" data-n="${n}" alt="">
            <span class="preset-num-badge">${n}</span>`
         : `<span class="preset-num-fallback">${n}</span>`;
       return `<button class="preset ${hasImage ? "" : "preset-empty"} ${active ? "active" : ""}" data-preset="${n}">${inner}</button>`;
@@ -225,7 +259,7 @@ class SoundtouchHybridCard extends HTMLElement {
       this._cardEl.innerHTML = `
         <div class="nav">
           <button class="arrow" data-dir="-1">‹</button>
-          <span class="name">${d.name} (Offline)</span>
+          <span class="name">${escapeHtml(d.name)} (Offline)</span>
           <button class="arrow" data-dir="1">›</button>
         </div>
         <div class="offline-msg">Offline</div>
@@ -235,8 +269,10 @@ class SoundtouchHybridCard extends HTMLElement {
     }
 
     const isStandby = d.isStandby;
-    const hasArt = d.art && d.art !== "custom_url";
+    const artUrl = d.art && d.art !== "custom_url" ? safeUrl(d.art) : null;
+    const hasArt = !!artUrl;
     const showHeart = !!this._speakers[d.name];
+    const volume = toNumber(d.volume);
     const showSync = true;
 
     const source = (d.source || "").toUpperCase();
@@ -251,7 +287,9 @@ class SoundtouchHybridCard extends HTMLElement {
       }
     }
 
-    this._cardEl.style.backgroundImage = hasArt ? `url('${d.art}')` : "none";
+    this._cardEl.style.backgroundImage = hasArt
+      ? `url("${artUrl.replace(/["\\\n\r]/g, encodeURIComponent)}")`
+      : "none";
     this._cardEl.classList.toggle("has-bg-art", hasArt);
     this._cardEl.classList.toggle("controls-playing", hasArt);
 
@@ -265,7 +303,7 @@ class SoundtouchHybridCard extends HTMLElement {
       ? this._devices.filter(dev => dev.zone && dev.zone.master === d.mac)
       : [];
     const groupMaxVolume = members.length
-      ? Math.max(d.volume, ...members.map(m => m.volume))
+      ? Math.max(volume, ...members.map(m => toNumber(m.volume)))
       : 0;
 
     this._cardEl.innerHTML = `
@@ -275,17 +313,17 @@ class SoundtouchHybridCard extends HTMLElement {
 
       <div class="nav">
         <button class="arrow" data-dir="-1">‹</button>
-        <span class="name">${d.name}</span>
+        <span class="name">${escapeHtml(d.name)}</span>
         <button class="arrow" data-dir="1">›</button>
       </div>
 
       <div class="playing-info">
         <div class="meta">
           <div class="title-row">
-            <span class="track">${isStandby ? "Off" : (d.track || d.source || "")}</span>
+            <span class="track">${isStandby ? "Off" : escapeHtml(d.track || d.source || "")}</span>
             ${showHeart && !isStandby ? `<button class="heart" title="Add to favorites">🤍</button>` : ""}
           </div>
-          <span class="artist">${isStandby ? "" : (d.artist || "")}</span>
+          <span class="artist">${isStandby ? "" : escapeHtml(d.artist || "")}</span>
         </div>
       </div>
 
@@ -303,8 +341,8 @@ class SoundtouchHybridCard extends HTMLElement {
       <div class="volume-row">
         <span class="vol-label">VOL</span>
         <span class="vol-bubble"></span>
-        <input type="range" class="volume" min="0" max="100" value="${d.volume}" ${isStandby ? "disabled" : ""}>
-        <span class="vol-value">${d.volume}</span>
+        <input type="range" class="volume" min="0" max="100" value="${volume}" ${isStandby ? "disabled" : ""}>
+        <span class="vol-value">${volume}</span>
       </div>
 
       ${isGroupMaster && members.length ? `
@@ -318,6 +356,23 @@ class SoundtouchHybridCard extends HTMLElement {
 
     this._bindNav();
     this._bindControls(d);
+    this._applyPresetImages(d);
+  }
+
+  _applyPresetImages(d) {
+    this._cardEl.querySelectorAll("img.preset-img").forEach((img) => {
+      const n = img.dataset.n;
+      const item = this._presetMap[d.ip + "_" + n] || this._presetMap["_" + n];
+      const url = safeUrl(item && item.image);
+      if (!url) {
+        img.remove();
+        return;
+      }
+      img.addEventListener("error", () => {
+        img.style.display = "none";
+      });
+      img.src = url;
+    });
   }
 
   _bindNav() {
@@ -496,12 +551,12 @@ class SoundtouchHybridCardEditor extends HTMLElement {
       </style>
       <div class="field">
         <label>Bose add-on URL</label>
-        <input type="text" id="bose_url" value="${this._config.bose_url || ""}" placeholder="/api/hassio_ingress/... or http://IP:PORT">
+        <input type="text" id="bose_url" value="${escapeHtml(this._config.bose_url || "")}" placeholder="/api/hassio_ingress/... or http://IP:PORT">
         <div class="hint">Ingress path of the Bose SoundTouch Hybrid add-on, or a full external URL</div>
       </div>
       <div class="field">
         <label>Music Assistant URL (optional, for the favorite button)</label>
-        <input type="text" id="mass_url" value="${this._config.mass_url || ""}" placeholder="/api/hassio_ingress/... or http://IP:PORT">
+        <input type="text" id="mass_url" value="${escapeHtml(this._config.mass_url || "")}" placeholder="/api/hassio_ingress/... or http://IP:PORT">
       </div>
       <div class="field">
         <label>Speaker mapping (Bose name → Home Assistant entity)</label>
