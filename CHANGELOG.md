@@ -5,13 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.2]
+## [1.1.3]
 
 ### Security
 - Escape all backend-provided text (speaker name, track, artist) before rendering it, so crafted track metadata (internet radio, Bluetooth, AUX, streaming services) can no longer inject markup or script into the Home Assistant frontend.
 - Validate artwork and preset image URLs: only `http`, `https` and relative URLs are accepted. Images are now assigned through DOM properties instead of string interpolation, and the inline `onerror` handler was replaced by `addEventListener`.
 - Escape configuration values rendered in the visual editor.
 
+## [1.1.2]
+
+
+### Security
+- Escape all backend-provided text (speaker name, track, artist) before rendering it, so crafted track metadata (internet radio, Bluetooth, AUX, streaming services) can no longer inject markup or script into the Home Assistant frontend.
+- Validate artwork and preset image URLs: only `http`, `https` and relative URLs are accepted. Images are now assigned through DOM properties instead of string interpolation, and the inline `onerror` handler was replaced by `addEventListener`.
+- Escape configuration values rendered in the visual editor.
+- 
 ## [1.1.1]
 
 ### Fixed
