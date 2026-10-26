@@ -68,6 +68,8 @@ class SoundtouchHybridCard extends HTMLElement {
     this._presetMap = {};
     this._settings = {};
     this._interacting = false;
+    this._likedIds = {};
+    this._likePending = {};
 
     if (!this.shadowRoot) {
       this.attachShadow({ mode: "open" });
@@ -201,16 +203,28 @@ class SoundtouchHybridCard extends HTMLElement {
     setTimeout(() => this._loadStatus(), 600);
   }
 
-  async _addFavorite(deviceName) {
+  // media_content_id of the song currently playing on the given speaker
+  _currentMediaId(deviceName) {
     const entityId = this._speakers[deviceName];
-    if (!entityId || !this._hass) return;
+    if (!entityId || !this._hass) return null;
     const state = this._hass.states[entityId];
-    const mediaId = state && state.attributes && state.attributes.media_content_id;
+    return (state && state.attributes && state.attributes.media_content_id) || null;
+  }
+
+  // Returns true if Music Assistant accepted the request
+  async _addFavorite(deviceName) {
+    const mediaId = this._currentMediaId(deviceName);
     if (!mediaId) {
-      console.warn("soundtouch-hybrid-card: no media_content_id found for", entityId);
-      return;
+      console.warn("soundtouch-hybrid-card: no media_content_id found for", deviceName);
+      return false;
     }
-    await this._massFetch("music/favorites/add_item", { item: mediaId });
+    const res = await this._massFetch("music/favorites/add_item", { item: mediaId });
+    return !!(res && res.ok);
+  }
+
+  _isLiked(deviceName) {
+    const mediaId = this._currentMediaId(deviceName);
+    return !!mediaId && this._likedIds[deviceName] === mediaId;
   }
 
   // ---------- UI ----------
@@ -321,7 +335,11 @@ class SoundtouchHybridCard extends HTMLElement {
         <div class="meta">
           <div class="title-row">
             <span class="track">${isStandby ? "Off" : escapeHtml(d.track || d.source || "")}</span>
-            ${showHeart && !isStandby ? `<button class="heart" title="Add to favorites">🤍</button>` : ""}
+            ${showHeart && !isStandby ? (() => {
+              const liked = this._isLiked(d.name);
+              const pending = !!this._likePending[d.name];
+              return `<button class="heart ${liked ? "liked" : ""} ${pending ? "pending" : ""}" title="${liked ? "Added to favorites" : "Add to favorites"}">${liked ? HEART_FILLED_ICON : HEART_OUTLINE_ICON}</button>`;
+            })() : ""}
           </div>
           <span class="artist">${isStandby ? "" : escapeHtml(d.artist || "")}</span>
         </div>
@@ -340,16 +358,22 @@ class SoundtouchHybridCard extends HTMLElement {
 
       <div class="volume-row">
         <span class="vol-label">VOL</span>
-        <span class="vol-bubble"></span>
-        <input type="range" class="volume" min="0" max="100" value="${volume}" ${isStandby ? "disabled" : ""}>
+        <div class="slider-wrap">
+          <span class="vol-bubble"></span>
+          <input type="range" class="volume slider-guarded" min="0" max="100" value="${volume}" ${isStandby ? "disabled" : ""}>
+          <div class="thumb-handle"></div>
+        </div>
         <span class="vol-value">${volume}</span>
       </div>
 
       ${isGroupMaster && members.length ? `
       <div class="volume-row group-volume-row">
         <span class="vol-label">GRP</span>
-        <span class="vol-bubble"></span>
-        <input type="range" class="group-volume" min="0" max="100" value="${groupMaxVolume}">
+        <div class="slider-wrap">
+          <span class="vol-bubble"></span>
+          <input type="range" class="group-volume slider-guarded" min="0" max="100" value="${groupMaxVolume}">
+          <div class="thumb-handle"></div>
+        </div>
         <span class="vol-value">${groupMaxVolume}</span>
       </div>` : ""}
     `;
@@ -385,16 +409,24 @@ class SoundtouchHybridCard extends HTMLElement {
     const heart = this._cardEl.querySelector(".heart");
     if (heart) {
       heart.onclick = async () => {
-        heart.disabled = true;
-        heart.textContent = "⏳";
+        const name = d.name;
+        // Already liked or request in flight: nothing to do
+        if (this._isLiked(name) || this._likePending[name]) return;
+
+        // The card re-renders regularly, so the state lives on the card,
+        // not on the button element.
+        const mediaId = this._currentMediaId(name);
+        this._likePending[name] = true;
+        this._render();
         try {
-          await this._addFavorite(d.name);
-          heart.textContent = "❤️";
+          if (await this._addFavorite(name)) {
+            this._likedIds[name] = mediaId;
+          }
         } catch (e) {
-          heart.textContent = "🤍";
-          console.error(e);
+          console.error("soundtouch-hybrid-card: could not add favorite", e);
         } finally {
-          heart.disabled = false;
+          this._likePending[name] = false;
+          this._render();
         }
       };
     }
@@ -440,7 +472,7 @@ class SoundtouchHybridCard extends HTMLElement {
       this._bindSliderBubble(groupVolume);
       groupVolume.addEventListener("input", () => {
         const val = parseInt(groupVolume.value, 10);
-        groupVolume.parentElement.querySelector(".vol-value").textContent = val;
+        groupVolume.closest(".volume-row").querySelector(".vol-value").textContent = val;
         if (!throttle) {
           throttle = setTimeout(() => {
             const delta = val - lastRef;
@@ -454,39 +486,81 @@ class SoundtouchHybridCard extends HTMLElement {
   }
 
   _bindSliderBubble(input) {
-    const row = input.parentElement;
-    const bubble = row.querySelector(".vol-bubble");
-    if (!bubble) return;
+    const wrap = input.closest(".slider-wrap");
+    const bubble = wrap && wrap.querySelector(".vol-bubble");
+    const handle = wrap && wrap.querySelector(".thumb-handle");
+    if (!wrap || !bubble || !handle) return;
 
-    const updateBubble = () => {
-      const min = parseFloat(input.min);
-      const max = parseFloat(input.max);
-      const percent = (parseFloat(input.value) - min) / (max - min);
-      const thumbSize = 26;
-      const left = percent * (input.offsetWidth - thumbSize) + thumbSize / 2;
-      bubble.style.left = `${left}px`;
+    const THUMB = 18;         // normal thumb size (px), see CSS
+    const THUMB_ACTIVE = 30;  // enlarged thumb size while dragging (px)
+    const min = parseFloat(input.min);
+    const max = parseFloat(input.max);
+    const thumbSize = () => (input.classList.contains("active") ? THUMB_ACTIVE : THUMB);
+    const fraction = () => (parseFloat(input.value) - min) / (max - min);
+
+    // Pure CSS positioning, no layout measurement needed
+    const leftFor = () => `calc(${thumbSize() / 2}px + (100% - ${thumbSize()}px) * ${fraction()})`;
+    const place = () => {
+      const left = leftFor();
+      bubble.style.left = left;
+      handle.style.left = left;
       bubble.textContent = input.value;
     };
 
-    const show = () => {
-      if (input.disabled) return;
+    const start = () => {
       this._interacting = true;
       input.classList.add("active");
       bubble.classList.add("visible");
-      updateBubble();
+      place();
     };
-    const hide = () => {
+    const end = () => {
       input.classList.remove("active");
       bubble.classList.remove("visible");
+      place();
       // Keep polling paused briefly so the device has time to catch up
       // to the value we just sent, avoiding a visible snap-back.
       setTimeout(() => { this._interacting = false; }, 600);
     };
 
-    input.addEventListener("pointerdown", show);
-    input.addEventListener("pointerup", hide);
-    input.addEventListener("pointercancel", hide);
-    input.addEventListener("input", updateBubble);
+    // Mouse / pen: the native slider works as usual
+    input.addEventListener("pointerdown", () => { if (!input.disabled) start(); });
+    input.addEventListener("pointerup", end);
+    input.addEventListener("pointercancel", end);
+    input.addEventListener("input", place);
+
+    // Touch screens: the input itself ignores touches (see CSS), so a stray
+    // tap or a scroll gesture over the slider never changes the volume.
+    // Only dragging the thumb handle does.
+    let grabOffset = 0;
+    handle.addEventListener("pointerdown", (e) => {
+      if (input.disabled) return;
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      start();
+      const rect = input.getBoundingClientRect();
+      const size = thumbSize();
+      const thumbCenterX = rect.left + size / 2 + fraction() * (rect.width - size);
+      grabOffset = e.clientX - thumbCenterX;
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!handle.hasPointerCapture(e.pointerId)) return;
+      const rect = input.getBoundingClientRect();
+      const size = thumbSize();
+      const centerX = e.clientX - grabOffset;
+      const f = Math.max(0, Math.min(1, (centerX - rect.left - size / 2) / (rect.width - size)));
+      const value = Math.round(min + f * (max - min));
+      if (String(value) === input.value) return;
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const release = (e) => {
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      end();
+    };
+    handle.addEventListener("pointerup", release);
+    handle.addEventListener("pointercancel", release);
+
+    place();
   }
 
   static getConfigElement() {
@@ -648,6 +722,14 @@ const POWER_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
   <path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
 </svg>`;
 
+const HEART_OUTLINE_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
+  <path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/>
+</svg>`;
+
+const HEART_FILLED_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
+  <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+</svg>`;
+
 const SOUNDWAVE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
   <line x1="3" y1="10" x2="3" y2="14"/>
   <line x1="7" y1="6" x2="7" y2="18"/>
@@ -764,10 +846,30 @@ const CARD_CSS = `
 .heart {
   background: none;
   border: none;
-  font-size: 1.1rem;
+  color: inherit;
   cursor: pointer;
   padding: 0;
   flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.heart svg {
+  width: 24px;
+  height: 24px;
+}
+.heart.pending {
+  opacity: 0.5;
+  cursor: default;
+}
+.heart.liked {
+  color: #e74c3c;
+  cursor: default;
+}
+.card.has-bg-art .heart:not(.liked) {
+  color: #fff;
 }
 .controls {
   display: grid;
@@ -932,6 +1034,34 @@ input[type=range].active::-moz-range-thumb {
 input[type=range].group-volume::-webkit-slider-thumb { background: #9b59b6; }
 input[type=range].group-volume::-moz-range-thumb { background: #9b59b6; }
 input[type=range]:disabled { opacity: 0.4; cursor: default; }
+
+.slider-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.slider-wrap input[type=range] {
+  width: 100%;
+  margin: 0;
+}
+.thumb-handle {
+  display: none;
+  position: absolute;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  transform: translate(-50%, -50%);
+  touch-action: none;
+  z-index: 2;
+}
+/* Touch screens: only the thumb handle reacts, never the track */
+@media (pointer: coarse) {
+  input[type=range].slider-guarded { pointer-events: none; }
+  .thumb-handle { display: block; }
+}
+input[type=range]:disabled ~ .thumb-handle { display: none; }
 
 .vol-bubble {
   position: absolute;

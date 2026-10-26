@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4]
+
+### Changed
+- The favorite button is now an outline heart that turns into a filled red heart once the song has been added to your favorites. The state is remembered per song and resets when the song changes.
+- On touch screens, the volume and group-volume sliders only react when the thumb itself is dragged. Tapping or scrolling over the track no longer changes the volume by accident. Mouse and pen input work as before.
+
+### Fixed
+- The favorite button no longer shows a song as liked when Music Assistant rejects the request.
+- The value bubble above the volume sliders now sits exactly above the thumb (it was shifted by the width of the label before).
+- The volume and group-volume sliders no longer jump back to their old position while being dragged. Re-rendering is now paused during interaction, including updates triggered by unrelated Home Assistant entities.
+
 ## [1.1.3]
 
 ### Security
@@ -14,16 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.2]
 
-
 ### Security
 - Escape all backend-provided text (speaker name, track, artist) before rendering it, so crafted track metadata (internet radio, Bluetooth, AUX, streaming services) can no longer inject markup or script into the Home Assistant frontend.
 - Validate artwork and preset image URLs: only `http`, `https` and relative URLs are accepted. Images are now assigned through DOM properties instead of string interpolation, and the inline `onerror` handler was replaced by `addEventListener`.
 - Escape configuration values rendered in the visual editor.
-- 
-## [1.1.1]
-
-### Fixed
-- The volume and group-volume sliders no longer jump back to their old position while being dragged. Re-rendering is now paused during interaction, including updates triggered by unrelated Home Assistant entities.
 
 ## [1.1.0]
 
