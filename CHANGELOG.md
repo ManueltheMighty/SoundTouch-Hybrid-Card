@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0]
+
+### Added
+- Search popup: a magnifier button next to the favorite button opens a popup to search tracks, albums, artists, playlists and radio stations through Music Assistant and play the selected item on the speaker that is currently shown. It uses the Home Assistant actions music_assistant.search and music_assistant.play_media, so no additional URL is required. The button is shown for every speaker listed under speakers.
+- New optional option mass_config_entry_id (also available in the visual editor) for setups where the Music Assistant integration entry cannot be detected automatically.
+
 ## [1.1.4]
 
 ### Changed
