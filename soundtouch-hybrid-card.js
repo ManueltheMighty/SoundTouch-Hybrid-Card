@@ -16,6 +16,14 @@
  * In that case the respective server must allow CORS
  * requests from the Home Assistant domain.
  *
+ * Optional: mass_config_entry_id - ID of the Music Assistant integration
+ * entry. Only needed for the search popup if it cannot be detected
+ * automatically (e.g. for non-admin users).
+ *
+ * The search popup (magnifier button) uses the Home Assistant actions
+ * music_assistant.search and music_assistant.play_media and is shown for
+ * every speaker that is listed under "speakers".
+ *
  * "speakers" maps the name as reported by the Bose backend
  * to the matching Home Assistant media_player entity. This is
  * only needed for the heart ("favorite") button, to read the
@@ -46,6 +54,31 @@ const safeUrl = (value) => {
     if (u.protocol === "http:" || u.protocol === "https:") return u.href;
   } catch (e) {
     // invalid URL
+  }
+  return null;
+};
+
+// ---- helpers for search results (all fields are untrusted) ----
+const nameOf = (v) => (typeof v === "string" ? v : v && typeof v.name === "string" ? v.name : "");
+
+const itemSubtitle = (it, group) => {
+  const a = it.artists ?? it.artist;
+  let artists = "";
+  if (Array.isArray(a)) artists = a.map(nameOf).filter(Boolean).join(", ");
+  else artists = nameOf(a);
+  const album = nameOf(it.album);
+  if (group.type === "track") return [artists, album].filter(Boolean).join(" · ") || group.single;
+  if (group.type === "album") return artists || group.single;
+  return group.single;
+};
+
+const itemImage = (it) => {
+  const first = it.metadata && Array.isArray(it.metadata.images) ? it.metadata.images[0] : null;
+  const candidates = [it.image, it.thumb, it.image_url, first];
+  for (const c of candidates) {
+    const raw = typeof c === "string" ? c : c && typeof c.path === "string" ? c.path : null;
+    const url = safeUrl(raw);
+    if (url) return url;
   }
   return null;
 };
@@ -98,6 +131,7 @@ class SoundtouchHybridCard extends HTMLElement {
 
   disconnectedCallback() {
     if (this._pollTimer) clearInterval(this._pollTimer);
+    if (this._searchDlg) this._closeSearch();
   }
 
   // ---------- Backend communication ----------
@@ -237,6 +271,230 @@ class SoundtouchHybridCard extends HTMLElement {
     this._cardEl = document.createElement("div");
     this._cardEl.className = "card";
     this.shadowRoot.appendChild(this._cardEl);
+
+    // The search popup lives next to (not inside) the card element, because
+    // the card element is re-rendered every couple of seconds.
+    this._buildSearchDialog();
+  }
+
+  // ---------- Search popup ----------
+
+  _buildSearchDialog() {
+    const dlg = document.createElement("dialog");
+    dlg.className = "search-dlg";
+    dlg.innerHTML = `
+      <div class="dlg">
+        <div class="dlg-head">
+          <input type="search" class="dlg-input" placeholder="Search songs, albums, artists…"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+          <button type="button" class="dlg-close" aria-label="Close">${CLOSE_ICON}</button>
+        </div>
+        <div class="dlg-target"></div>
+        <div class="dlg-body"></div>
+      </div>`;
+    this.shadowRoot.appendChild(dlg);
+
+    this._searchDlg = dlg;
+    this._searchInput = dlg.querySelector(".dlg-input");
+    this._searchTargetEl = dlg.querySelector(".dlg-target");
+    this._searchBody = dlg.querySelector(".dlg-body");
+    this._searchSeq = 0;
+    this._searchTimer = null;
+    this._searchLastQuery = "";
+
+    dlg.querySelector(".dlg-close").addEventListener("click", () => this._closeSearch());
+    // Click on the backdrop (the dialog element itself) closes the popup
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) this._closeSearch(); });
+    this._searchInput.addEventListener("input", () => {
+      clearTimeout(this._searchTimer);
+      const q = this._searchInput.value.trim();
+      if (q.length < 2) {
+        this._searchSeq++;
+        this._setSearchStatus("Type at least 2 characters to search.");
+        return;
+      }
+      this._searchTimer = setTimeout(() => this._runSearch(q), 350);
+    });
+    this._searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        clearTimeout(this._searchTimer);
+        const q = this._searchInput.value.trim();
+        if (q.length >= 2) this._runSearch(q);
+      }
+    });
+    this._setSearchStatus("Search your music library and streaming services.");
+  }
+
+  _openSearch(speakerName) {
+    this._searchTarget = speakerName;
+    this._searchTargetEl.textContent = `Play on ${speakerName}`;
+    if (typeof this._searchDlg.showModal === "function") {
+      if (!this._searchDlg.open) this._searchDlg.showModal();
+    } else {
+      this._searchDlg.setAttribute("open", "");
+    }
+    requestAnimationFrame(() => {
+      this._searchInput.focus();
+      this._searchInput.select();
+    });
+  }
+
+  _closeSearch() {
+    clearTimeout(this._searchTimer);
+    this._searchSeq++;
+    if (typeof this._searchDlg.close === "function") {
+      if (this._searchDlg.open) this._searchDlg.close();
+    } else {
+      this._searchDlg.removeAttribute("open");
+    }
+  }
+
+  _setSearchStatus(text, isError = false) {
+    this._searchBody.replaceChildren();
+    const el = document.createElement("div");
+    el.className = "dlg-status" + (isError ? " error" : "");
+    el.textContent = text;
+    this._searchBody.appendChild(el);
+  }
+
+  async _getMaEntryId() {
+    if (this._config.mass_config_entry_id) return this._config.mass_config_entry_id;
+    if (this._maEntryId) return this._maEntryId;
+    const entries = await this._hass.callWS({ type: "config_entries/get", domain: "music_assistant" });
+    const list = Array.isArray(entries) ? entries : [];
+    const entry = list.find((e) => e.domain === "music_assistant" && e.state === "loaded") || list[0];
+    if (!entry) {
+      const err = new Error("The Music Assistant integration was not found in Home Assistant.");
+      err.userMessage = err.message;
+      throw err;
+    }
+    this._maEntryId = entry.entry_id;
+    return this._maEntryId;
+  }
+
+  async _searchMedia(query) {
+    let entryId;
+    try {
+      entryId = await this._getMaEntryId();
+    } catch (e) {
+      if (e.userMessage) throw e;
+      const err = new Error("Could not look up the Music Assistant integration. Set mass_config_entry_id in the card configuration.");
+      err.userMessage = err.message;
+      throw err;
+    }
+    const res = await this._hass.callWS({
+      type: "call_service",
+      domain: "music_assistant",
+      service: "search",
+      service_data: {
+        config_entry_id: entryId,
+        name: query,
+        media_type: ["track", "album", "artist", "playlist", "radio"],
+        limit: 5
+      },
+      return_response: true
+    });
+    return (res && res.response) || res || {};
+  }
+
+  async _runSearch(query) {
+    if (!this._hass) return;
+    const seq = ++this._searchSeq;
+    this._searchLastQuery = query;
+    this._setSearchStatus("Searching…");
+    try {
+      const data = await this._searchMedia(query);
+      if (seq !== this._searchSeq) return; // a newer search replaced this one
+      this._renderSearchResults(data);
+    } catch (e) {
+      if (seq !== this._searchSeq) return;
+      console.error("soundtouch-hybrid-card: search failed", e);
+      this._setSearchStatus(e.userMessage || "Search failed. Check that Music Assistant is running.", true);
+    }
+  }
+
+  _renderSearchResults(data) {
+    const groups = [
+      { key: "tracks", label: "Tracks", type: "track", single: "Track" },
+      { key: "albums", label: "Albums", type: "album", single: "Album" },
+      { key: "artists", label: "Artists", type: "artist", single: "Artist" },
+      { key: "playlists", label: "Playlists", type: "playlist", single: "Playlist" },
+      { key: "radio", label: "Radio", type: "radio", single: "Radio" }
+    ];
+    this._searchBody.replaceChildren();
+    let total = 0;
+
+    for (const g of groups) {
+      const items = (Array.isArray(data[g.key]) ? data[g.key] : []).filter(
+        (it) => it && typeof it.uri === "string" && it.uri
+      );
+      if (!items.length) continue;
+      total += items.length;
+
+      const heading = document.createElement("div");
+      heading.className = "dlg-heading";
+      heading.textContent = g.label;
+      this._searchBody.appendChild(heading);
+
+      for (const it of items) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "res";
+
+        const thumb = document.createElement("span");
+        thumb.className = "res-thumb";
+        const imgUrl = itemImage(it);
+        if (imgUrl) {
+          const img = document.createElement("img");
+          img.alt = "";
+          img.loading = "lazy";
+          img.addEventListener("error", () => { img.remove(); thumb.innerHTML = NOTE_ICON; });
+          img.src = imgUrl;
+          thumb.appendChild(img);
+        } else {
+          thumb.innerHTML = NOTE_ICON;
+        }
+
+        const text = document.createElement("span");
+        text.className = "res-text";
+        const title = document.createElement("span");
+        title.className = "res-title";
+        title.textContent = String(it.name ?? it.title ?? it.uri);
+        const sub = document.createElement("span");
+        sub.className = "res-sub";
+        sub.textContent = itemSubtitle(it, g);
+        text.append(title, sub);
+
+        row.append(thumb, text);
+        row.addEventListener("click", () => this._playMedia(it.uri, g.type, row));
+        this._searchBody.appendChild(row);
+      }
+    }
+
+    if (!total) this._setSearchStatus(`No results for “${this._searchLastQuery}”.`);
+  }
+
+  async _playMedia(uri, mediaType, row) {
+    const entityId = this._speakers[this._searchTarget];
+    if (!entityId || !this._hass) {
+      this._setSearchStatus("This speaker is not mapped to a Home Assistant entity (see “speakers” in the card configuration).", true);
+      return;
+    }
+    row.classList.add("busy");
+    try {
+      await this._hass.callService(
+        "music_assistant", "play_media",
+        { media_id: uri, media_type: mediaType },
+        { entity_id: entityId }
+      );
+      this._closeSearch();
+      setTimeout(() => this._loadStatus(), 1500);
+    } catch (e) {
+      console.error("soundtouch-hybrid-card: could not start playback", e);
+      row.classList.remove("busy");
+      const msg = (e && e.message) ? e.message : "Could not start playback.";
+      this._setSearchStatus(`Could not start playback: ${msg}`, true);
+    }
   }
 
   _cycle(direction) {
@@ -335,11 +593,14 @@ class SoundtouchHybridCard extends HTMLElement {
         <div class="meta">
           <div class="title-row">
             <span class="track">${isStandby ? "Off" : escapeHtml(d.track || d.source || "")}</span>
-            ${showHeart && !isStandby ? (() => {
-              const liked = this._isLiked(d.name);
-              const pending = !!this._likePending[d.name];
-              return `<button class="heart ${liked ? "liked" : ""} ${pending ? "pending" : ""}" title="${liked ? "Added to favorites" : "Add to favorites"}">${liked ? HEART_FILLED_ICON : HEART_OUTLINE_ICON}</button>`;
-            })() : ""}
+            <div class="title-actions">
+              ${showHeart ? `<button class="search-btn" title="Search music">${SEARCH_ICON}</button>` : ""}
+              ${showHeart && !isStandby ? (() => {
+                const liked = this._isLiked(d.name);
+                const pending = !!this._likePending[d.name];
+                return `<button class="heart ${liked ? "liked" : ""} ${pending ? "pending" : ""}" title="${liked ? "Added to favorites" : "Add to favorites"}">${liked ? HEART_FILLED_ICON : HEART_OUTLINE_ICON}</button>`;
+              })() : ""}
+            </div>
           </div>
           <span class="artist">${isStandby ? "" : escapeHtml(d.artist || "")}</span>
         </div>
@@ -406,6 +667,9 @@ class SoundtouchHybridCard extends HTMLElement {
   }
 
   _bindControls(d) {
+    const searchBtn = this._cardEl.querySelector(".search-btn");
+    if (searchBtn) searchBtn.onclick = () => this._openSearch(d.name);
+
     const heart = this._cardEl.querySelector(".heart");
     if (heart) {
       heart.onclick = async () => {
@@ -633,6 +897,11 @@ class SoundtouchHybridCardEditor extends HTMLElement {
         <input type="text" id="mass_url" value="${escapeHtml(this._config.mass_url || "")}" placeholder="/api/hassio_ingress/... or http://IP:PORT">
       </div>
       <div class="field">
+        <label>Music Assistant config entry ID (optional, for the search popup)</label>
+        <input type="text" id="mass_config_entry_id" value="${escapeHtml(this._config.mass_config_entry_id || "")}" placeholder="Detected automatically if left empty">
+        <div class="hint">Only needed if the search popup cannot find the Music Assistant integration on its own</div>
+      </div>
+      <div class="field">
         <label>Speaker mapping (Bose name → Home Assistant entity)</label>
         <div id="speakers-list"></div>
         <button type="button" class="add-btn">+ Add speaker</button>
@@ -645,6 +914,12 @@ class SoundtouchHybridCardEditor extends HTMLElement {
     });
     this.querySelector("#mass_url").addEventListener("change", (e) => {
       this._config.mass_url = e.target.value;
+      this._fireChanged();
+    });
+    this.querySelector("#mass_config_entry_id").addEventListener("change", (e) => {
+      const v = e.target.value.trim();
+      if (v) this._config.mass_config_entry_id = v;
+      else delete this._config.mass_config_entry_id;
       this._fireChanged();
     });
     this.querySelector(".add-btn").addEventListener("click", () => {
@@ -722,6 +997,18 @@ const POWER_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
   <path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z"/>
 </svg>`;
 
+const SEARCH_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
+  <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+</svg>`;
+
+const CLOSE_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
+  <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+</svg>`;
+
+const NOTE_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
+  <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/>
+</svg>`;
+
 const HEART_OUTLINE_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
   <path d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/>
 </svg>`;
@@ -743,6 +1030,135 @@ const BLUETOOTH_ICON = `<svg viewBox="0 0 24 24" fill="currentColor">
 </svg>`;
 
 const CARD_CSS = `
+/* ---------- Search popup ---------- */
+.search-dlg {
+  padding: 0;
+  border: none;
+  border-radius: 16px;
+  width: min(92vw, 560px);
+  max-width: none;
+  height: min(80vh, 640px);
+  height: min(80dvh, 640px);
+  background: var(--card-background-color, #1c1c1c);
+  color: var(--primary-text-color, #e0e0e0);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+.search-dlg[open] { display: block; }
+.search-dlg::backdrop { background: rgba(0,0,0,0.55); }
+.dlg {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.dlg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--divider-color, rgba(128,128,128,0.3));
+}
+.dlg-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  font-size: 16px; /* 16px prevents iOS from zooming into the field */
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--divider-color, rgba(128,128,128,0.4));
+  background: var(--secondary-background-color, rgba(128,128,128,0.12));
+  color: inherit;
+  outline: none;
+}
+.dlg-input:focus { border-color: var(--accent-color, #2ecc71); }
+.dlg-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.dlg-close svg { width: 24px; height: 24px; }
+.dlg-target {
+  padding: 8px 16px 0;
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+.dlg-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 8px 12px;
+}
+.dlg-status {
+  padding: 28px 16px;
+  text-align: center;
+  opacity: 0.7;
+  font-size: 0.9rem;
+}
+.dlg-status.error { color: var(--error-color, #e74c3c); opacity: 1; }
+.dlg-heading {
+  padding: 14px 8px 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+.res {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 10px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.res:hover, .res:focus-visible { background: var(--secondary-background-color, rgba(128,128,128,0.15)); outline: none; }
+.res.busy { opacity: 0.5; pointer-events: none; }
+.res-thumb {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--secondary-background-color, rgba(128,128,128,0.2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+}
+.res-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.res-thumb svg { width: 24px; height: 24px; opacity: 0.5; }
+.res-text { display: flex; flex-direction: column; min-width: 0; }
+.res-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.res-sub {
+  font-size: 0.8rem;
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Card ---------- */
 :host {
   display: block;
   position: relative;
@@ -859,6 +1275,31 @@ const CARD_CSS = `
 .heart svg {
   width: 24px;
   height: 24px;
+}
+.title-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.search-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.search-btn svg {
+  width: 24px;
+  height: 24px;
+}
+.card.has-bg-art .search-btn {
+  color: #fff;
 }
 .heart.pending {
   opacity: 0.5;
